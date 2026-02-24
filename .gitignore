@@ -1,0 +1,11 @@
+# סודות וסביבה
+.env
+service-account.json
+
+# ספריות
+node_modules/
+
+# קבצים זמניים
+*.csv
+.wwebjs_auth/
+.wwebjs_cache/

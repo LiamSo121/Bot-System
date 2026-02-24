@@ -1,0 +1,17 @@
+{
+  "name": "liam-bot-system",
+  "version": "1.0.0",
+  "description": "WhatsApp Bot System",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.6.7",
+    "dotenv": "^17.3.1",
+    "googleapis": "^134.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.6"
+  }
+}
