@@ -1,12 +1,13 @@
 /**
  * WhatsApp Multi-Tenant SaaS Engine
- * המנוע המרכזי שדרכו הכל רץ.
+ * המנוע המרכזי הגנרי - אין כאן שום לוגיקה ספציפית לבוט מסוים.
+ * כל ההתאמות נמצאות ב: tools/, logicFactory.js, bots.json
  */
 
 const fs = require('fs');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const { GoogleGenerativeAI, SchemaType } = require("@google/generative-ai");
+const { VertexAI } = require('@google-cloud/vertexai');
 require('dotenv').config();
 
 const logicFactory = require('./logicFactory');
@@ -22,131 +23,27 @@ const botsConfigInterpolated = botsConfigRaw.replace(/\$\{(\w+)\}/g, (_, key) =>
 });
 const botsConfig = JSON.parse(botsConfigInterpolated);
 
+// אימות Vertex AI דרך service-account.json
+process.env.GOOGLE_APPLICATION_CREDENTIALS = './service-account.json';
+
 function startBot(config) {
     console.log(`[System] Initializing ${config.displayName}...`);
 
-    const genAI = new GoogleGenerativeAI(config.geminiKey);
-
-    const tools = [{
-        functionDeclarations: [
-            {
-                name: "validateAddress",
-                description: "Validate an address using Google Maps. Call this for ANY pickup or delivery address the user provides to ensure it is accurate.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: { address: { type: SchemaType.STRING, description: "The address to validate" } },
-                    required: ["address"]
-                }
-            },
-            {
-                name: "validatePhone",
-                description: "Validate a phone number to ensure it starts with 05 and has exactly 10 digits.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: { phone: { type: SchemaType.STRING, description: "The phone number to validate" } },
-                    required: ["phone"]
-                }
-            },
-            {
-                name: "calculateDistanceAndPrice",
-                description: "Calculate distance and price between two addresses. Call this when both pickup and delivery addresses are verified.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                        origin: { type: SchemaType.STRING, description: "The pickup address" },
-                        destination: { type: SchemaType.STRING, description: "The delivery address" }
-                    },
-                    required: ["origin", "destination"]
-                }
-            },
-            {
-                name: "saveOrderToSheet",
-                description: "Save the final order details to Google Sheets. Call this ONLY after the user confirms the final summary with 'מאשר'.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                        time: { type: SchemaType.STRING, description: "Time of order" },
-                        ordererName: { type: SchemaType.STRING, description: "Name of the person ordering" },
-                        pickupAddress: { type: SchemaType.STRING, description: "Full pickup address" },
-                        pickupContact: { type: SchemaType.STRING, description: "Pickup contact name" },
-                        pickupPhone: { type: SchemaType.STRING, description: "Pickup contact phone" },
-                        deliveryAddress: { type: SchemaType.STRING, description: "Full delivery address" },
-                        deliveryContact: { type: SchemaType.STRING, description: "Delivery contact name" },
-                        deliveryPhone: { type: SchemaType.STRING, description: "Delivery contact phone" },
-                        distance: { type: SchemaType.STRING, description: "Calculated distance in KM" },
-                        price: { type: SchemaType.STRING, description: "Calculated price" },
-                        packageDetails: { type: SchemaType.STRING, description: "Type of delivery (food/envelope/package) and package details (weight, fragile) if applicable." }
-                    },
-                    required: ["ordererName", "pickupAddress", "pickupContact", "pickupPhone", "deliveryAddress", "deliveryContact", "deliveryPhone", "distance", "price", "packageDetails"]
-                }
-            },
-            {
-                name: "getOrdersFromSheet",
-                description: "Read existing orders from Google Sheets. Call this ONLY when the admin (the user whose message starts with '!') asks for a summary, details, or status of existing deliveries.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: {},
-                    required: []
-                }
-            },
-            {
-                name: "updateOrderStatusInSheet",
-                description: "Update the payment ('סטטוס תשלום') and/or completion ('הושלם') status of an existing order. Use this when the admin asks to mark an order as paid or completed.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                        ordererName: { type: SchemaType.STRING, description: "The name of the person who originally ordered (from column C)." },
-                        date: { type: SchemaType.STRING, description: "The date of the order (from column A)." },
-                        updatePayment: { type: SchemaType.STRING, description: "Optional. Set to 'כן' or 'לא' if updating payment status." },
-                        updateCompleted: { type: SchemaType.STRING, description: "Optional. Set to 'כן' or 'לא' if updating completion status." }
-                    },
-                    required: ["ordererName", "date"]
-                }
-            },
-            {
-                name: "generateOrdersReport",
-                description: "Generate and send an Excel/CSV report of the orders to the admin. Use this ONLY when the admin explicitly asks for a file, excel, report, csv, or a document of the orders.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: {},
-                    required: []
-                }
-            },
-            {
-                name: "saveOrderToCalendar",
-                description: "Save the order to Google Calendar. Call this right after saveOrderToSheet when the user confirms the order.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                        title: { type: SchemaType.STRING, description: "Title of the calendar event (e.g. 'משלוח: שם הלקוח')" },
-                        description: { type: SchemaType.STRING, description: "Full details of the delivery to put in the event description (contacts, phones, full addresses, price, distance)." },
-                        location: { type: SchemaType.STRING, description: "Pickup address" },
-                        startTimeIso: { type: SchemaType.STRING, description: "Start time of the delivery in ISO 8601 format (e.g. 2026-02-21T13:00:00+02:00)." },
-                        endTimeIso: { type: SchemaType.STRING, description: "End time of the delivery in ISO 8601 format (e.g. 2026-02-21T14:00:00+02:00). Usually 1-2 hours after start time." }
-                    },
-                    required: ["title", "description", "location", "startTimeIso", "endTimeIso"]
-                }
-            },
-            {
-                name: "notifyAdmin",
-                description: "Notify the human manager when a user asks a question the bot cannot answer. Use this only when the answer is NOT in the FAQ.",
-                parameters: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                        message: { type: SchemaType.STRING, description: "The user's original question" },
-                        senderInfo: { type: SchemaType.STRING, description: "The user's name or phone number" }
-                    },
-                    required: ["message", "senderInfo"]
-                }
-            }
-        ]
-    }];
-
-    const model = genAI.getGenerativeModel({
-        model: "gemini-2.5-flash",
-        tools: tools
+    // --- Vertex AI Setup ---
+    const vertexAI = new VertexAI({
+        project: process.env.GCP_PROJECT,
+        location: process.env.GCP_LOCATION || 'us-central1',
     });
 
+    // טעינת הכלים (tools) הספציפיים לבוט מתיקיית tools/
+    const tools = require(`./tools/${config.toolsFile}`);
+
+    const model = vertexAI.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        tools: tools,
+    });
+
+    // --- WhatsApp Client Setup ---
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: config.id }),
         puppeteer: {
@@ -169,7 +66,7 @@ function startBot(config) {
         // התעלמות מקבוצות
         if (msg.from.includes('@g.us')) return;
 
-        // זיהוי השולח: אם זאת הודעה שאנחנו שלחנו, השולח הוא המספר של הבוט. אחרת זה מי ששלח לנו.
+        // זיהוי השולח: אם זאת הודעה שאנחנו שלחנו, השולח הוא המספר של הבוט.
         let senderNumber = msg.fromMe ? config.whatsappNumber : msg.from.replace('@c.us', '');
 
         // המרה לפורמט ישראלי (05...) במקום 972
@@ -181,11 +78,8 @@ function startBot(config) {
         // מניעת לופ: נאפשר הודעות יוצאות (fromMe) רק אם מדובר במנהל שכותב לעצמו (Self-chat).
         if (msg.fromMe) {
             const isSelfChat = msg.to === client.info.wid._serialized;
-
-            // אם זה לא מנהל או לא סלף-צ'אט - נתעלם (הבוט לא צריך לענות כשהמנהל מדבר עם אחרים)
             if (!isAdmin || !isSelfChat) return;
 
-            // הגנה נוספת מניעת לופ: אם זה סלף-צ'אט, נוודא שלא מדובר בתגובה אוטומטית של הבוט
             const chatSession = sessions.get(msg.from);
             if (chatSession && msg.body === chatSession.lastResponse) return;
         }
@@ -202,7 +96,7 @@ function startBot(config) {
             // הזרקת מידע זמני להוראות המערכת
             const currentTime = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
 
-            // טעינת שאלות ותשובות מקובץ חיצוני
+            // טעינת שאלות ותשובות מקובץ חיצוני (אם קיים)
             let faqContent = "";
             try {
                 if (fs.existsSync('faq_deliveries.txt')) {
@@ -221,20 +115,19 @@ function startBot(config) {
             if (!chatSession) {
                 chatSession = {
                     chat: model.startChat({
-                        history: [],
                         systemInstruction: { parts: [{ text: dynamicInstruction }] }
                     }),
                     lastInstruction: dynamicInstruction
                 };
                 sessions.set(msg.from, chatSession);
             } else {
-                // אם ההוראות השתנו (למשל השעה השתנתה), נתחיל שיחה חדשה עם אותה היסטוריה אבל הוראות מעודכנות
+                // עדכון ה-instruction (למשל אם השעה השתנתה)
                 const history = await chatSession.chat.getHistory();
                 chatSession.chat = model.startChat({
                     history: history,
                     systemInstruction: { parts: [{ text: dynamicInstruction }] }
                 });
-                chatSession.lastInstruction = dynamicInstruction; // Update the last instruction used
+                chatSession.lastInstruction = dynamicInstruction;
             }
 
             const chat = chatSession.chat;
@@ -245,15 +138,18 @@ function startBot(config) {
             let result = await chat.sendMessage(msg.body);
             let response = result.response;
 
-            let calls = response.functionCalls();
+            // --- עיבוד function calls ---
+            // Vertex AI מחזיר function calls דרך candidates[0].content.parts
+            let calls = getFunctionCalls(response);
             let fileToSend = null;
 
             while (calls && calls.length > 0) {
-                const results = [];
+                const functionResponseParts = [];
                 for (const call of calls) {
-                    // הזרקה אוטומטית של מספר השולח לכלים שזקוקים לזה (כמו saveOrderToSheet)
+                    // הזרקה אוטומטית של מספר השולח
                     const argsWithSender = { ...call.args, senderPhone: senderNumber };
                     const toolResult = await botTools[call.name](argsWithSender);
+
                     if (toolResult && toolResult.sendFile) {
                         fileToSend = toolResult.sendFile;
                     }
@@ -264,38 +160,38 @@ function startBot(config) {
                             console.error("Failed to send admin alert:", err.message);
                         }
                     }
-                    results.push({ functionResponse: { name: call.name, response: toolResult } });
+
+                    functionResponseParts.push({
+                        functionResponse: {
+                            name: call.name,
+                            response: toolResult
+                        }
+                    });
                 }
-                result = await chat.sendMessage(results);
+
+                result = await chat.sendMessage(functionResponseParts);
                 response = result.response;
-                calls = response.functionCalls();
+                calls = getFunctionCalls(response);
             }
+
+            // --- שליחת תגובה ---
+            const botText = getResponseText(response);
+            if (chatSession) chatSession.lastResponse = botText;
 
             if (fileToSend) {
                 const media = MessageMedia.fromFilePath(fileToSend);
-                const botText = response.text();
-                // שמירת התגובה האחרונה למניעת לופים
-                if (chatSession) chatSession.lastResponse = botText;
                 await msg.reply(media, undefined, { caption: botText });
-                try {
-                    fs.unlinkSync(fileToSend);
-                } catch (err) {
-                    console.error("Failed to delete temp file:", err);
-                }
+                try { fs.unlinkSync(fileToSend); } catch (e) { console.error("Failed to delete temp file:", e); }
             } else {
-                const botText = response.text();
-                // שמירת התגובה האחרונה למניעת לופים
-                if (chatSession) chatSession.lastResponse = botText;
                 await msg.reply(botText);
             }
+
         } catch (error) {
             console.error(`[${config.id}] Error:`, error.message);
 
-            // הודעה ידידותית ללקוח
             const clientErrorMessage = "מצטערים, ארעה שגיאה טכנית קלה בזמן עיבוד הבקשה. המנהל קיבל עדכון ויצור איתך קשר בהקדם כדי להשלים את ההזמנה.";
             await msg.reply(clientErrorMessage);
 
-            // דיווח טכני למנהל (למספר של הבוט עצמו/מנהל)
             try {
                 const adminErrorReport = `⚠️ *דיווח שגיאה בבוט:*\nמשתמש: ${senderNumber}\nהודעה: ${msg.body}\nשגיאה: ${error.message}`;
                 await client.sendMessage(`${config.whatsappNumber}@c.us`, adminErrorReport);
@@ -306,6 +202,36 @@ function startBot(config) {
     });
 
     client.initialize();
+}
+
+/**
+ * מחלץ function calls מתגובת Vertex AI.
+ * Vertex AI מחזיר אותם כ-parts עם שדה `functionCall`.
+ */
+function getFunctionCalls(response) {
+    try {
+        const parts = response?.candidates?.[0]?.content?.parts || [];
+        return parts
+            .filter(p => p.functionCall)
+            .map(p => p.functionCall);
+    } catch (e) {
+        return [];
+    }
+}
+
+/**
+ * מחלץ את הטקסט מתגובת Vertex AI.
+ */
+function getResponseText(response) {
+    try {
+        const parts = response?.candidates?.[0]?.content?.parts || [];
+        return parts
+            .filter(p => p.text)
+            .map(p => p.text)
+            .join('');
+    } catch (e) {
+        return '';
+    }
 }
 
 botsConfig.forEach(startBot);
