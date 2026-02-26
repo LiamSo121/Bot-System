@@ -5,6 +5,7 @@
  */
 
 const fs = require('fs');
+const crypto = require('crypto');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { VertexAI } = require('@google-cloud/vertexai');
@@ -38,14 +39,10 @@ function startBot(config) {
     // טעינת הכלים (tools) הספציפיים לבוט מתיקיית tools/
     const tools = require(`./tools/${config.toolsFile}`);
 
-    let botCacheData = null; // { content: CachedContent, date: string }
+    let botCacheData = null; // { content: CachedContent, hash: string }
 
     async function getOrCreateCache(faqContent) {
         const today = new Date().toLocaleDateString('he-IL');
-        if (botCacheData && botCacheData.date === today) {
-            console.log(`[${config.displayName}] Reusing existing cache for today.`);
-            return botCacheData.content;
-        }
 
         const location = process.env.GCP_LOCATION || 'us-central1';
         const modelResourceName = `projects/${process.env.GCP_PROJECT}/locations/${location}/publishers/google/models/gemini-2.5-flash`;
@@ -54,6 +51,13 @@ function startBot(config) {
             .replace('${new Date().toLocaleDateString(\'he-IL\')}', today)
             .replace('{{FAQ}}', faqContent);
 
+        const contentHash = crypto.createHash('md5').update(staticInstruction).digest('hex');
+
+        if (botCacheData && botCacheData.hash === contentHash) {
+            console.log(`[${config.displayName}] Reusing existing cache (content unchanged).`);
+            return botCacheData.content;
+        }
+
         const newCache = await vertexAI.preview.cachedContents.create({
             model: modelResourceName,
             systemInstruction: { role: 'system', parts: [{ text: staticInstruction }] },
@@ -61,7 +65,7 @@ function startBot(config) {
             ttl: '86400s',
         });
 
-        botCacheData = { content: newCache, date: today };
+        botCacheData = { content: newCache, hash: contentHash };
         console.log(`[${config.displayName}] Created new cache: ${newCache.name}`);
         return botCacheData.content;
     }
