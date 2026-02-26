@@ -34,7 +34,8 @@ module.exports = [
                     type: FunctionDeclarationSchemaType.OBJECT,
                     properties: {
                         origin: { type: FunctionDeclarationSchemaType.STRING, description: "The pickup address" },
-                        destination: { type: FunctionDeclarationSchemaType.STRING, description: "The delivery address" }
+                        destination: { type: FunctionDeclarationSchemaType.STRING, description: "The delivery address" },
+                        isImmediate: { type: FunctionDeclarationSchemaType.BOOLEAN, description: "Set to true if the user requested immediate delivery. Adds a 20 NIS surcharge to the price." }
                     },
                     required: ["origin", "destination"]
                 }
@@ -55,9 +56,11 @@ module.exports = [
                         deliveryPhone: { type: FunctionDeclarationSchemaType.STRING, description: "Delivery contact phone" },
                         distance: { type: FunctionDeclarationSchemaType.STRING, description: "Calculated distance in KM" },
                         price: { type: FunctionDeclarationSchemaType.STRING, description: "Calculated price" },
-                        packageDetails: { type: FunctionDeclarationSchemaType.STRING, description: "Type of delivery (food/envelope/package) and package details (weight, fragile) if applicable." }
+                        packageDetails: { type: FunctionDeclarationSchemaType.STRING, description: "Type of delivery (food/envelope/package) and package details (weight, fragile) if applicable." },
+                        deliveryDate: { type: FunctionDeclarationSchemaType.STRING, description: "Scheduled delivery date (e.g. '26/02/2026'). Use 'מיידי' if immediate." },
+                        deliveryTime: { type: FunctionDeclarationSchemaType.STRING, description: "Scheduled delivery time (e.g. '14:00'). Use 'מיידי' if immediate." }
                     },
-                    required: ["ordererName", "pickupAddress", "pickupContact", "pickupPhone", "deliveryAddress", "deliveryContact", "deliveryPhone", "distance", "price", "packageDetails"]
+                    required: ["ordererName", "pickupAddress", "pickupContact", "pickupPhone", "deliveryAddress", "deliveryContact", "deliveryPhone", "distance", "price", "packageDetails", "deliveryDate", "deliveryTime"]
                 }
             },
             {

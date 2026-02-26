@@ -36,8 +36,8 @@ module.exports = (config) => ({
         };
     },
 
-    // חישוב מרחק ותמחור: 50 ש"ח בסיס + 5 ש"ח לכל ק"מ מעל 5 ק"מ
-    calculateDistanceAndPrice: async ({ origin, destination }) => {
+    // חישוב מרחק ותמחור: 50 ש"ח בסיס + 5 ש"ח לכל ק"מ מעל 5 ק"מ + 20 ש"ח למיידי
+    calculateDistanceAndPrice: async ({ origin, destination, isImmediate = false }) => {
         try {
             const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${encodeURIComponent(origin)}&destinations=${encodeURIComponent(destination)}&key=${config.mapsKey}&language=iw`;
             const res = await axios.get(url);
@@ -50,12 +50,16 @@ module.exports = (config) => ({
                 if (distanceInKm > 5) {
                     price += (distanceInKm - 5) * 5;
                 }
+                if (isImmediate) {
+                    price += 20;
+                }
 
                 return {
                     success: true,
                     distance: `${distanceInKm}`,
                     price: `${price}`,
-                    displayPrice: `${price} ש"ח`
+                    displayPrice: `${price} ש"ח`,
+                    immediateNote: isImmediate ? 'כולל תוספת 20 ש"ח למשלוח מיידי' : null
                 };
             }
             return { success: false, error: "לא ניתן לחשב מרחק בין הנקודות." };
@@ -74,8 +78,8 @@ module.exports = (config) => ({
             const sheets = google.sheets({ version: 'v4', auth });
 
             const row = [
-                data.date || new Date().toLocaleDateString('he-IL'),
-                data.time || new Date().toLocaleTimeString('he-IL'),
+                data.deliveryDate || new Date().toLocaleDateString('he-IL'),
+                data.deliveryTime || new Date().toLocaleTimeString('he-IL'),
                 data.ordererName,
                 `'${data.senderPhone}`, // עמודה D: פלאפון המזמין
                 data.pickupAddress,
