@@ -38,10 +38,33 @@ function startBot(config) {
     // טעינת הכלים (tools) הספציפיים לבוט מתיקיית tools/
     const tools = require(`./tools/${config.toolsFile}`);
 
-    const model = vertexAI.getGenerativeModel({
-        model: 'gemini-2.5-flash',
-        tools: tools,
-    });
+    let botCacheData = null; // { content: CachedContent, date: string }
+
+    async function getOrCreateCache(faqContent) {
+        const today = new Date().toLocaleDateString('he-IL');
+        if (botCacheData && botCacheData.date === today) {
+            console.log(`[${config.displayName}] Reusing existing cache for today.`);
+            return botCacheData.content;
+        }
+
+        const location = process.env.GCP_LOCATION || 'us-central1';
+        const modelResourceName = `projects/${process.env.GCP_PROJECT}/locations/${location}/publishers/google/models/gemini-2.5-flash`;
+
+        const staticInstruction = config.systemInstruction
+            .replace('${new Date().toLocaleDateString(\'he-IL\')}', today)
+            .replace('{{FAQ}}', faqContent);
+
+        const newCache = await vertexAI.preview.cachedContents.create({
+            model: modelResourceName,
+            systemInstruction: { role: 'system', parts: [{ text: staticInstruction }] },
+            tools: tools,
+            ttl: '86400s',
+        });
+
+        botCacheData = { content: newCache, date: today };
+        console.log(`[${config.displayName}] Created new cache: ${newCache.name}`);
+        return botCacheData.content;
+    }
 
     // --- WhatsApp Client Setup ---
     const client = new Client({
@@ -63,8 +86,8 @@ function startBot(config) {
     client.on('ready', () => console.log(`[${config.displayName}] ONLINE`));
 
     client.on('message_create', async (msg) => {
-        // התעלמות מקבוצות
-        if (msg.from.includes('@g.us')) return;
+        // התעלמות מקבוצות וסטטוסים
+        if (msg.from.includes('@g.us') || msg.from === 'status@broadcast') return;
 
         // זיהוי השולח: אם זאת הודעה שאנחנו שלחנו, השולח הוא המספר של הבוט.
         let senderNumber = msg.fromMe ? config.whatsappNumber : msg.from.replace('@c.us', '');
@@ -106,28 +129,22 @@ function startBot(config) {
                 console.error("Failed to read faq_deliveries.txt:", err.message);
             }
 
-            const dynamicInstruction = config.systemInstruction
-                .replace('${new Date().toLocaleDateString(\'he-IL\')}', new Date().toLocaleDateString('he-IL'))
-                .replace('{{FAQ}}', faqContent)
-                + `\nהשעה הנוכחית היא: ${currentTime}.`;
+            // Get/create cache, then get a model bound to it
+            const cache = await getOrCreateCache(faqContent);
+            const cachedModel = vertexAI.preview.getGenerativeModelFromCachedContent(cache);
 
             let chatSession = sessions.get(msg.from);
             if (!chatSession) {
                 chatSession = {
-                    chat: model.startChat({
-                        systemInstruction: { parts: [{ text: dynamicInstruction }] }
-                    }),
-                    lastInstruction: dynamicInstruction
+                    chat: cachedModel.startChat({}),
+                    lastResponse: null,
                 };
                 sessions.set(msg.from, chatSession);
             } else {
-                // עדכון ה-instruction (למשל אם השעה השתנתה)
-                const history = await chatSession.chat.getHistory();
-                chatSession.chat = model.startChat({
-                    history: history,
-                    systemInstruction: { parts: [{ text: dynamicInstruction }] }
-                });
-                chatSession.lastInstruction = dynamicInstruction;
+                // Sliding window: retain only last 8 messages (4 user/model pairs)
+                const fullHistory = await chatSession.chat.getHistory();
+                const trimmedHistory = fullHistory.length > 8 ? fullHistory.slice(-8) : fullHistory;
+                chatSession.chat = cachedModel.startChat({ history: trimmedHistory });
             }
 
             const chat = chatSession.chat;
@@ -135,8 +152,11 @@ function startBot(config) {
             const whatsappChat = await msg.getChat();
             await whatsappChat.sendStateTyping();
 
-            let result = await chat.sendMessage(msg.body);
+            const messageWithTime = `[שעה: ${currentTime}]\n${msg.body}`;
+            let result = await chat.sendMessage(messageWithTime);
             let response = result.response;
+
+            console.log(`[${config.displayName}] cachedContentTokenCount: ${response.usageMetadata?.cachedContentTokenCount ?? 'N/A'}`);
 
             // --- עיבוד function calls ---
             // Vertex AI מחזיר function calls דרך candidates[0].content.parts
