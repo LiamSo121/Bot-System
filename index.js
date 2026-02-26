@@ -94,7 +94,7 @@ function startBot(config) {
         if (msg.from.includes('@g.us') || msg.from === 'status@broadcast') return;
 
         // זיהוי השולח: אם זאת הודעה שאנחנו שלחנו, השולח הוא המספר של הבוט.
-        let senderNumber = msg.fromMe ? config.whatsappNumber : msg.from.replace('@c.us', '');
+        let senderNumber = msg.fromMe ? config.whatsappNumber : msg.from.split('@')[0];
 
         // המרה לפורמט ישראלי (05...) במקום 972
         if (senderNumber.startsWith('972')) {
@@ -111,10 +111,13 @@ function startBot(config) {
             if (chatSession && msg.body === chatSession.lastResponse) return;
         }
 
-        // חסימת משתמשים רגילים מלשלוח פקודות מנהל
-        if (msg.body.startsWith('!') && !isAdmin) {
-            console.log(`[${config.displayName}] Unauthorized admin access attempt from ${senderNumber}`);
+        // חסימת משתמשים רגילים מלשלוח פקודות מנהל, והתעלמות מהודעות מנהל ללא פקודה
+        if (isAdmin && !msg.body.startsWith('!')) {
             return;
+        }
+
+        if (msg.body.startsWith('!') && !isAdmin) {
+            console.log(`[${config.displayName}] Unauthorized admin access attempt from ${senderNumber}`); return;
         }
 
         console.log(`[${config.displayName}] Processing message from ${msg.from}: ${msg.body}`);
@@ -219,7 +222,8 @@ function startBot(config) {
 
             try {
                 const adminErrorReport = `⚠️ *דיווח שגיאה בבוט:*\nמשתמש: ${senderNumber}\nהודעה: ${msg.body}\nשגיאה: ${error.message}`;
-                await client.sendMessage(`${config.whatsappNumber}@c.us`, adminErrorReport);
+                const adminJid = config.whatsappNumber.includes('@') ? config.whatsappNumber : `${config.whatsappNumber}@c.us`;
+                await client.sendMessage(adminJid, adminErrorReport);
             } catch (adminErr) {
                 console.error("Failed to notify admin about error:", adminErr.message);
             }

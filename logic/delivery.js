@@ -295,7 +295,7 @@ module.exports = (config) => ({
                 success: true,
                 message: "הבקשה הועברה למנהל.",
                 adminAlert: adminMessage,
-                adminNumber: `${config.whatsappNumber}@c.us`
+                adminNumber: config.whatsappNumber.includes('@') ? config.whatsappNumber : `${config.whatsappNumber}@c.us`
             };
         } catch (e) {
             console.error(`[${config.id}] Notify Admin Error:`, e.message);

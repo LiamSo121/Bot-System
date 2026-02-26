@@ -2,9 +2,10 @@
     {
         "id": "liam_deliveries",
         "displayName": "ליאם שליחויות",
-        "whatsappNumber": "972504598291",
+        "whatsappNumber": "972552877341",
         "adminNumbers": [
-            "0504598291"
+            "0504598291",
+            "57093134508138"
         ],
         "logicType": "delivery",
         "toolsFile": "delivery",
