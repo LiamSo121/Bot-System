@@ -122,11 +122,12 @@ function startBot(config) {
             // טעינת שאלות ותשובות מקובץ חיצוני (אם קיים)
             let faqContent = "";
             try {
-                if (fs.existsSync('faq_deliveries.txt')) {
-                    faqContent = fs.readFileSync('faq_deliveries.txt', 'utf8');
+                const faqPath = `faq/${config.id}.txt`;
+                if (fs.existsSync(faqPath)) {
+                    faqContent = fs.readFileSync(faqPath, 'utf8');
                 }
             } catch (err) {
-                console.error("Failed to read faq_deliveries.txt:", err.message);
+                console.error(`Failed to read FAQ for ${config.id}:`, err.message);
             }
 
             // Get/create cache, then get a model bound to it
