@@ -27,6 +27,46 @@ const botsConfig = JSON.parse(botsConfigInterpolated);
 // אימות Vertex AI דרך service-account.json
 process.env.GOOGLE_APPLICATION_CREDENTIALS = './service-account.json';
 
+// זמן המתנה (ms) לפני שליחת כל תגובה — מייצר תחושה טבעית יותר
+const REPLY_DELAY_MS = 1500;
+
+// זמן המתנה (ms) לפני שליחת תזכורת לנוטש באמצע הזמנה (10 דקות)
+const CHURN_REMINDER_DELAY_MS = 10 * 60 * 1000;
+
+// לאחר כמה ms של שתיקה ממשתמש מצרפים את כל הודעותיו ושולחים לGemini בבת אחת
+const DEBOUNCE_MS = 3000;
+
+/**
+ * תור הודעות פשוט לשליטה על מספר הבקשות המקבילות.
+ * מבטיח שלא יותר מ-`concurrency` הודעות יעובדו בו-זמנית,
+ * ומונע קריסה בעומס גבוה ושליחה מהירה מדי שתיחשב ספאם על ידי WhatsApp.
+ */
+class MessageQueue {
+    constructor(concurrency = 10) {
+        this.concurrency = concurrency;
+        this.running = 0;
+        this.queue = [];
+    }
+
+    add(fn) {
+        return new Promise((resolve, reject) => {
+            this.queue.push({ fn, resolve, reject });
+            this._drain();
+        });
+    }
+
+    _drain() {
+        while (this.running < this.concurrency && this.queue.length > 0) {
+            const { fn, resolve, reject } = this.queue.shift();
+            this.running++;
+            fn().then(resolve, reject).finally(() => {
+                this.running--;
+                this._drain();
+            });
+        }
+    }
+}
+
 function startBot(config) {
     console.log(`[System] Initializing ${config.displayName}...`);
 
@@ -81,6 +121,14 @@ function startBot(config) {
 
     const sessions = new Map();
     const botTools = logicFactory[config.logicType](config);
+    const messageQueue = new MessageQueue(10);
+
+    // מניעת עיבוד כפול — message_create עלול לירות כמה פעמים על אותה הודעה
+    const processedIds = new Set();
+
+    // צבירת הודעות מהירות לפני שליחה לGemini (debounce)
+    // מבנה: msgFrom → { timer, messages: [] }
+    const userBuffers = new Map();
 
     client.on('qr', qr => {
         console.log(`\n[${config.displayName}] סרוק קוד עבור המספר ${config.whatsappNumber}:`);
@@ -93,13 +141,35 @@ function startBot(config) {
         // התעלמות מקבוצות וסטטוסים
         if (msg.from.includes('@g.us') || msg.from === 'status@broadcast') return;
 
-        // זיהוי השולח: אם זאת הודעה שאנחנו שלחנו, השולח הוא המספר של הבוט.
-        let senderNumber = msg.fromMe ? config.whatsappNumber : msg.from.split('@')[0];
+        // --- מניעת עיבוד כפול ---
+        // whatsapp-web.js יכול לירות message_create מספר פעמים לאותו ID
+        const msgId = msg.id._serialized;
+        if (processedIds.has(msgId)) return;
+        processedIds.add(msgId);
+        setTimeout(() => processedIds.delete(msgId), 5 * 60 * 1000);
+
+        // --- זיהוי מספר השולח (כולל טיפול בפורמט @lid) ---
+        // WhatsApp Multi-Device מזהה משתמשים לפעמים עם @lid במקום @c.us.
+        // במקרה זה מספר הטלפון האמיתי מגיע דרך getContact().
+        let senderNumber;
+        if (msg.fromMe) {
+            senderNumber = config.whatsappNumber;
+        } else if (msg.from.includes('@lid')) {
+            try {
+                const contact = await msg.getContact();
+                senderNumber = contact.number || msg.from.split('@')[0];
+            } catch (e) {
+                senderNumber = msg.from.split('@')[0];
+            }
+        } else {
+            senderNumber = msg.from.split('@')[0];
+        }
 
         // המרה לפורמט ישראלי (05...) במקום 972
-        if (senderNumber.startsWith('972')) {
+        if (senderNumber && senderNumber.startsWith('972')) {
             senderNumber = '0' + senderNumber.substring(3);
         }
+
         const isAdmin = config.adminNumbers && config.adminNumbers.includes(senderNumber);
 
         // מניעת לופ: נאפשר הודעות יוצאות (fromMe) רק אם מדובר במנהל שכותב לעצמו (Self-chat).
@@ -111,17 +181,65 @@ function startBot(config) {
             if (chatSession && msg.body === chatSession.lastResponse) return;
         }
 
-        // חסימת משתמשים רגילים מלשלוח פקודות מנהל, והתעלמות מהודעות מנהל ללא פקודה
-        if (isAdmin && !msg.body.startsWith('!')) {
+        // חסימת משתמשים רגילים מלשלוח פקודות מנהל
+        if (msg.body && msg.body.startsWith('!') && !isAdmin) {
+            console.log(`[${config.displayName}] Unauthorized admin access attempt from ${senderNumber}`);
             return;
         }
 
-        if (msg.body.startsWith('!') && !isAdmin) {
-            console.log(`[${config.displayName}] Unauthorized admin access attempt from ${senderNumber}`); return;
+        // --- פקודות מנהל: עיבוד מיידי ללא debounce ---
+        if (isAdmin && msg.body && msg.body.startsWith('!')) {
+            console.log(`[${config.displayName}] Admin command from ${senderNumber}: ${msg.body}`);
+            messageQueue.add(() => processMessage(msg, msg.body, null, senderNumber));
+            return;
         }
 
-        console.log(`[${config.displayName}] Processing message from ${msg.from}: ${msg.body}`);
+        // --- Debounce: צבירת הודעות עד שהמשתמש מפסיק להקליד ---
+        // אם המשתמש שולח כמה הודעות ברצף, כולן יצורפו להודעה אחת לפני שליחה לGemini.
+        // כך נמנעת תגובה נפרדת לכל הודעה.
+        let buffer = userBuffers.get(msg.from);
+        if (!buffer) {
+            buffer = { timer: null, messages: [] };
+            userBuffers.set(msg.from, buffer);
+        }
+        buffer.messages.push(msg);
 
+        if (buffer.timer) clearTimeout(buffer.timer);
+
+        const capturedSenderNumber = senderNumber;
+        buffer.timer = setTimeout(() => {
+            userBuffers.delete(msg.from);
+
+            const { messages } = buffer;
+            const lastMsg = messages[messages.length - 1];
+
+            // צירוף כל גופי ההודעות לטקסט אחד
+            const combinedBody = messages
+                .map(m => m.body || '')
+                .filter(b => b.length > 0)
+                .join('\n');
+
+            // שימוש בהודעה הראשונה שמכילה מדיה (תמונה)
+            const mediaMsg = messages.find(m => m.hasMedia) || null;
+
+            if (messages.length > 1) {
+                console.log(`[${config.displayName}] Debounced ${messages.length} messages from ${lastMsg.from}`);
+            } else {
+                console.log(`[${config.displayName}] Processing message from ${lastMsg.from}: ${combinedBody.substring(0, 60)}`);
+            }
+
+            messageQueue.add(() => processMessage(lastMsg, combinedBody, mediaMsg, capturedSenderNumber));
+        }, DEBOUNCE_MS);
+    });
+
+    /**
+     * עיבוד ההודעה: קריאה לGemini, הרצת function calls, ושליחת תגובה.
+     * @param {object} msg       - הודעת ה-WhatsApp האחרונה בסדרה (לצורך reply/getChat)
+     * @param {string} body      - הטקסט המשולב מכל ההודעות שנצברו ב-debounce
+     * @param {object|null} mediaMsg - ההודעה שמכילה מדיה (אם קיימת)
+     * @param {string} senderNumber  - מספר הטלפון המפוענח של השולח
+     */
+    async function processMessage(msg, body, mediaMsg, senderNumber) {
         try {
             // הזרקת מידע זמני להוראות המערכת
             const currentTime = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
@@ -146,13 +264,42 @@ function startBot(config) {
                 chatSession = {
                     chat: cachedModel.startChat({}),
                     lastResponse: null,
+                    orderCompleted: false,  // האם ההזמנה הושלמה בהצלחה
+                    reminderSent: false,    // האם כבר נשלחה תזכורת נטישה (מוגבל לפעם אחת)
+                    reminderTimeout: null,  // מזהה ה-timeout של התזכורת
                 };
                 sessions.set(msg.from, chatSession);
             } else {
-                // Sliding window: retain only last 8 messages (4 user/model pairs)
+                // איפוס מצב הזמנה — כל הודעה חדשה מאפסת את מצב ה-orderCompleted
+                // אך reminderSent לא מאופס כדי למנוע הטרדה חוזרת
+                chatSession.orderCompleted = false;
+                if (chatSession.reminderTimeout) clearTimeout(chatSession.reminderTimeout);
+
+                // Sliding window: retain only last 40 turns (20 user/model pairs).
+                // A full delivery order can easily reach 15+ exchanges — 8 was too low
+                // and caused the bot to forget addresses given early in the conversation.
                 const fullHistory = await chatSession.chat.getHistory();
-                const trimmedHistory = fullHistory.length > 8 ? fullHistory.slice(-8) : fullHistory;
+                const trimmedHistory = fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
                 chatSession.chat = cachedModel.startChat({ history: trimmedHistory });
+            }
+
+            // --- תזמון תזכורת נטישה ---
+            // שולח תזכורת אחת בלבד אם המשתמש לא מגיב ולא השלים הזמנה
+            if (!chatSession.reminderSent) {
+                chatSession.reminderTimeout = setTimeout(async () => {
+                    if (!chatSession.orderCompleted && !chatSession.reminderSent) {
+                        chatSession.reminderSent = true;
+                        try {
+                            await client.sendMessage(
+                                msg.from,
+                                'היי! 😊 ראיתי שהתחלת הזמנה ולא סיימת. אם תרצה להמשיך — אני כאן בשבילך!'
+                            );
+                            console.log(`[${config.displayName}] Churn reminder sent to ${msg.from}`);
+                        } catch (e) {
+                            console.error(`[${config.displayName}] Failed to send churn reminder:`, e.message);
+                        }
+                    }
+                }, CHURN_REMINDER_DELAY_MS);
             }
 
             const chat = chatSession.chat;
@@ -160,8 +307,29 @@ function startBot(config) {
             const whatsappChat = await msg.getChat();
             await whatsappChat.sendStateTyping();
 
-            const messageWithTime = `[שעה: ${currentTime}]\n${msg.body}`;
-            let result = await chat.sendMessage(messageWithTime);
+            // --- בניית חלקי ההודעה (טקסט + מדיה אם נשלחה תמונה) ---
+            const messageParts = [];
+
+            if (mediaMsg) {
+                try {
+                    const mediaData = await mediaMsg.downloadMedia();
+                    if (mediaData && mediaData.data) {
+                        messageParts.push({
+                            inlineData: {
+                                data: mediaData.data,
+                                mimeType: mediaData.mimetype || 'image/jpeg',
+                            }
+                        });
+                        console.log(`[${config.displayName}] Media received: ${mediaData.mimetype}`);
+                    }
+                } catch (e) {
+                    console.error(`[${config.displayName}] Failed to download media:`, e.message);
+                }
+            }
+
+            messageParts.push({ text: `[שעה: ${currentTime}]\n${body}` });
+
+            let result = await chat.sendMessage(messageParts);
             let response = result.response;
 
             console.log(`[${config.displayName}] cachedContentTokenCount: ${response.usageMetadata?.cachedContentTokenCount ?? 'N/A'}`);
@@ -177,6 +345,12 @@ function startBot(config) {
                     // הזרקה אוטומטית של מספר השולח
                     const argsWithSender = { ...call.args, senderPhone: senderNumber };
                     const toolResult = await botTools[call.name](argsWithSender);
+
+                    // זיהוי השלמת הזמנה — מבטל את תזכורת הנטישה
+                    if (call.name === 'saveOrderToSheet' && toolResult?.success) {
+                        chatSession.orderCompleted = true;
+                        if (chatSession.reminderTimeout) clearTimeout(chatSession.reminderTimeout);
+                    }
 
                     if (toolResult && toolResult.sendFile) {
                         fileToSend = toolResult.sendFile;
@@ -202,6 +376,11 @@ function startBot(config) {
                 calls = getFunctionCalls(response);
             }
 
+            // --- השהייה לפני שליחה + הפעלת טיפינג מחדש ---
+            // מייצר תחושה טבעית ומונע שליחה מהירה מדי
+            try { await whatsappChat.sendStateTyping(); } catch (e) {}
+            await new Promise(resolve => setTimeout(resolve, REPLY_DELAY_MS));
+
             // --- שליחת תגובה ---
             const botText = getResponseText(response);
             if (chatSession) chatSession.lastResponse = botText;
@@ -221,14 +400,14 @@ function startBot(config) {
             await msg.reply(clientErrorMessage);
 
             try {
-                const adminErrorReport = `⚠️ *דיווח שגיאה בבוט:*\nמשתמש: ${senderNumber}\nהודעה: ${msg.body}\nשגיאה: ${error.message}`;
+                const adminErrorReport = `⚠️ *דיווח שגיאה בבוט:*\nמשתמש: ${senderNumber}\nהודעה: ${body}\nשגיאה: ${error.message}`;
                 const adminJid = config.whatsappNumber.includes('@') ? config.whatsappNumber : `${config.whatsappNumber}@c.us`;
                 await client.sendMessage(adminJid, adminErrorReport);
             } catch (adminErr) {
                 console.error("Failed to notify admin about error:", adminErr.message);
             }
         }
-    });
+    }
 
     client.initialize();
 }
