@@ -59,28 +59,51 @@ class MessageQueue {
 
 function startBot(config) {
     // --- טעינת סודות הבוט הספציפי (secrets/<bot-id>/.env + service-account.json) ---
-    const secretsDir = config.secretsDir || '.';
+    // שימוש ב-path.resolve כדי להבטיח שהנתיב תמיד אבסולוטי (חשוב עבור PM2)
+    const projectRoot = process.cwd();
+    const secretsDir = path.resolve(projectRoot, config.secretsDir || '.');
+    const envPath = path.join(secretsDir, '.env');
+
     let botEnv = {};
     try {
-        botEnv = dotenv.parse(fs.readFileSync(path.join(secretsDir, '.env'), 'utf8'));
+        if (fs.existsSync(envPath)) {
+            const envRaw = fs.readFileSync(envPath, 'utf8');
+            botEnv = dotenv.parse(envRaw);
+
+            // בדיקה האם המשתנים נטענו (לצרכי דיבוג בלבד)
+            const keys = Object.keys(botEnv);
+            if (keys.length === 0) {
+                console.error(`[${config.id}] ⚠️  .env file found at ${envPath} but it seems EMPTY or invalid.`);
+            } else {
+                console.log(`[${config.id}] ✅ Loaded ${keys.length} variables from .env`);
+            }
+        } else {
+            console.error(`[${config.id}] ❌ .env file NOT FOUND at: ${envPath}`);
+        }
     } catch (e) {
-        console.error(`[${config.id}] ⚠️  Could not load .env from ${secretsDir}:`, e.message);
+        console.error(`[${config.id}] ⚠️  Error reading .env from ${secretsDir}:`, e.message);
     }
 
     // החלפת ${VAR} בתצורת הבוט עם ערכים מה-.env הספציפי לו
     const resolvedConfig = JSON.parse(
         JSON.stringify(config).replace(/\$\{(\w+)\}/g, (_, key) => {
             const val = botEnv[key];
-            if (!val) console.error(`[${config.id}] ⚠️  Missing env var: ${key}`);
+            if (!val) {
+                // בדיקה אם זה משתנה סביבה של המערכת (fallback)
+                const systemVal = process.env[key];
+                if (systemVal) return systemVal;
+
+                console.error(`[${config.id}] ⚠️  Missing env var in .env: ${key}`);
+            }
             return val || '';
         })
     );
 
-    console.log(`[System] Initializing ${resolvedConfig.displayName}...`);
+    console.log(`[System] Initializing ${resolvedConfig.displayName} (ID: ${config.id})...`);
 
-    const gcpProject = botEnv.GCP_PROJECT;
-    const gcpLocation = botEnv.GCP_LOCATION || 'us-central1';
-    const serviceAccountPath = path.resolve(secretsDir, 'service-account.json');
+    const gcpProject = botEnv.GCP_PROJECT || process.env.GCP_PROJECT;
+    const gcpLocation = botEnv.GCP_LOCATION || process.env.GCP_LOCATION || 'us-central1';
+    const serviceAccountPath = path.join(secretsDir, 'service-account.json');
 
     // --- Vertex AI Setup ---
     const vertexAI = new VertexAI({
@@ -392,7 +415,7 @@ function startBot(config) {
 
             // --- השהייה לפני שליחה + הפעלת טיפינג מחדש ---
             // מייצר תחושה טבעית ומונע שליחה מהירה מדי
-            try { await whatsappChat.sendStateTyping(); } catch (e) {}
+            try { await whatsappChat.sendStateTyping(); } catch (e) { }
             await new Promise(resolve => setTimeout(resolve, REPLY_DELAY_MS));
 
             // --- שליחת תגובה ---
