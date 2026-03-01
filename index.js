@@ -5,27 +5,17 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { VertexAI } = require('@google-cloud/vertexai');
-require('dotenv').config();
+const dotenv = require('dotenv');
 
 const logicFactory = require('./logicFactory');
 
-// טעינת הגדרות הבוטים מתוך קובץ ה-JSON + החלפת משתני env
-const botsConfigRaw = fs.readFileSync('./bots.json', 'utf8');
-const botsConfigInterpolated = botsConfigRaw.replace(/\$\{(\w+)\}/g, (_, key) => {
-    const value = process.env[key];
-    if (!value) {
-        console.error(`[System] ⚠️  Missing environment variable: ${key}`);
-    }
-    return value || '';
-});
-const botsConfig = JSON.parse(botsConfigInterpolated);
-
-// אימות Vertex AI דרך service-account.json
-process.env.GOOGLE_APPLICATION_CREDENTIALS = './service-account.json';
+// טעינת הגדרות הבוטים מתוך קובץ ה-JSON (החלפת ${VAR} נעשית per-bot בתוך startBot)
+const botsConfig = JSON.parse(fs.readFileSync('./bots.json', 'utf8'));
 
 // זמן המתנה (ms) לפני שליחת כל תגובה — מייצר תחושה טבעית יותר
 const REPLY_DELAY_MS = 1500;
@@ -68,33 +58,55 @@ class MessageQueue {
 }
 
 function startBot(config) {
-    console.log(`[System] Initializing ${config.displayName}...`);
+    // --- טעינת סודות הבוט הספציפי (secrets/<bot-id>/.env + service-account.json) ---
+    const secretsDir = config.secretsDir || '.';
+    let botEnv = {};
+    try {
+        botEnv = dotenv.parse(fs.readFileSync(path.join(secretsDir, '.env'), 'utf8'));
+    } catch (e) {
+        console.error(`[${config.id}] ⚠️  Could not load .env from ${secretsDir}:`, e.message);
+    }
+
+    // החלפת ${VAR} בתצורת הבוט עם ערכים מה-.env הספציפי לו
+    const resolvedConfig = JSON.parse(
+        JSON.stringify(config).replace(/\$\{(\w+)\}/g, (_, key) => {
+            const val = botEnv[key];
+            if (!val) console.error(`[${config.id}] ⚠️  Missing env var: ${key}`);
+            return val || '';
+        })
+    );
+
+    console.log(`[System] Initializing ${resolvedConfig.displayName}...`);
+
+    const gcpProject = botEnv.GCP_PROJECT;
+    const gcpLocation = botEnv.GCP_LOCATION || 'us-central1';
+    const serviceAccountPath = path.resolve(secretsDir, 'service-account.json');
 
     // --- Vertex AI Setup ---
     const vertexAI = new VertexAI({
-        project: process.env.GCP_PROJECT,
-        location: process.env.GCP_LOCATION || 'us-central1',
+        project: gcpProject,
+        location: gcpLocation,
+        googleAuthOptions: { keyFilename: serviceAccountPath },
     });
 
     // טעינת הכלים (tools) הספציפיים לבוט מתיקיית tools/
-    const tools = require(`./tools/${config.toolsFile}`);
+    const tools = require(`./tools/${resolvedConfig.toolsFile}`);
 
     let botCacheData = null; // { content: CachedContent, hash: string }
 
     async function getOrCreateCache(faqContent) {
         const today = new Date().toLocaleDateString('he-IL');
 
-        const location = process.env.GCP_LOCATION || 'us-central1';
-        const modelResourceName = `projects/${process.env.GCP_PROJECT}/locations/${location}/publishers/google/models/gemini-2.5-flash`;
+        const modelResourceName = `projects/${gcpProject}/locations/${gcpLocation}/publishers/google/models/gemini-2.5-flash`;
 
-        const staticInstruction = config.systemInstruction
+        const staticInstruction = resolvedConfig.systemInstruction
             .replace('${new Date().toLocaleDateString(\'he-IL\')}', today)
             .replace('{{FAQ}}', faqContent);
 
         const contentHash = crypto.createHash('md5').update(staticInstruction).digest('hex');
 
         if (botCacheData && botCacheData.hash === contentHash) {
-            console.log(`[${config.displayName}] Reusing existing cache (content unchanged).`);
+            console.log(`[${resolvedConfig.displayName}] Reusing existing cache (content unchanged).`);
             return botCacheData.content;
         }
 
@@ -106,13 +118,13 @@ function startBot(config) {
         });
 
         botCacheData = { content: newCache, hash: contentHash };
-        console.log(`[${config.displayName}] Created new cache: ${newCache.name}`);
+        console.log(`[${resolvedConfig.displayName}] Created new cache: ${newCache.name}`);
         return botCacheData.content;
     }
 
     // --- WhatsApp Client Setup ---
     const client = new Client({
-        authStrategy: new LocalAuth({ clientId: config.id }),
+        authStrategy: new LocalAuth({ clientId: resolvedConfig.id }),
         puppeteer: {
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
@@ -120,7 +132,7 @@ function startBot(config) {
     });
 
     const sessions = new Map();
-    const botTools = logicFactory[config.logicType](config);
+    const botTools = logicFactory[resolvedConfig.logicType](resolvedConfig);
     const messageQueue = new MessageQueue(10);
 
     // מניעת עיבוד כפול — message_create עלול לירות כמה פעמים על אותה הודעה
@@ -131,11 +143,11 @@ function startBot(config) {
     const userBuffers = new Map();
 
     client.on('qr', qr => {
-        console.log(`\n[${config.displayName}] סרוק קוד עבור המספר ${config.whatsappNumber}:`);
+        console.log(`\n[${resolvedConfig.displayName}] סרוק קוד עבור המספר ${resolvedConfig.whatsappNumber}:`);
         qrcode.generate(qr, { small: true });
     });
 
-    client.on('ready', () => console.log(`[${config.displayName}] ONLINE`));
+    client.on('ready', () => console.log(`[${resolvedConfig.displayName}] ONLINE`));
 
     client.on('message_create', async (msg) => {
         // התעלמות מקבוצות וסטטוסים
@@ -153,7 +165,7 @@ function startBot(config) {
         // במקרה זה מספר הטלפון האמיתי מגיע דרך getContact().
         let senderNumber;
         if (msg.fromMe) {
-            senderNumber = config.whatsappNumber;
+            senderNumber = resolvedConfig.whatsappNumber;
         } else if (msg.from.includes('@lid')) {
             try {
                 const contact = await msg.getContact();
@@ -170,7 +182,7 @@ function startBot(config) {
             senderNumber = '0' + senderNumber.substring(3);
         }
 
-        const isAdmin = config.adminNumbers && config.adminNumbers.includes(senderNumber);
+        const isAdmin = resolvedConfig.adminNumbers && resolvedConfig.adminNumbers.includes(senderNumber);
 
         // מניעת לופ: נאפשר הודעות יוצאות (fromMe) רק אם מדובר במנהל שכותב לעצמו (Self-chat).
         if (msg.fromMe) {
@@ -183,13 +195,13 @@ function startBot(config) {
 
         // חסימת משתמשים רגילים מלשלוח פקודות מנהל
         if (msg.body && msg.body.startsWith('!') && !isAdmin) {
-            console.log(`[${config.displayName}] Unauthorized admin access attempt from ${senderNumber}`);
+            console.log(`[${resolvedConfig.displayName}] Unauthorized admin access attempt from ${senderNumber}`);
             return;
         }
 
         // --- פקודות מנהל: עיבוד מיידי ללא debounce ---
         if (isAdmin && msg.body && msg.body.startsWith('!')) {
-            console.log(`[${config.displayName}] Admin command from ${senderNumber}: ${msg.body}`);
+            console.log(`[${resolvedConfig.displayName}] Admin command from ${senderNumber}: ${msg.body}`);
             messageQueue.add(() => processMessage(msg, msg.body, null, senderNumber));
             return;
         }
@@ -223,9 +235,9 @@ function startBot(config) {
             const mediaMsg = messages.find(m => m.hasMedia) || null;
 
             if (messages.length > 1) {
-                console.log(`[${config.displayName}] Debounced ${messages.length} messages from ${lastMsg.from}`);
+                console.log(`[${resolvedConfig.displayName}] Debounced ${messages.length} messages from ${lastMsg.from}`);
             } else {
-                console.log(`[${config.displayName}] Processing message from ${lastMsg.from}: ${combinedBody.substring(0, 60)}`);
+                console.log(`[${resolvedConfig.displayName}] Processing message from ${lastMsg.from}: ${combinedBody.substring(0, 60)}`);
             }
 
             messageQueue.add(() => processMessage(lastMsg, combinedBody, mediaMsg, capturedSenderNumber));
@@ -247,12 +259,12 @@ function startBot(config) {
             // טעינת שאלות ותשובות מקובץ חיצוני (אם קיים)
             let faqContent = "";
             try {
-                const faqPath = `faq/${config.id}.txt`;
+                const faqPath = `faq/${resolvedConfig.id}.txt`;
                 if (fs.existsSync(faqPath)) {
                     faqContent = fs.readFileSync(faqPath, 'utf8');
                 }
             } catch (err) {
-                console.error(`Failed to read FAQ for ${config.id}:`, err.message);
+                console.error(`Failed to read FAQ for ${resolvedConfig.id}:`, err.message);
             }
 
             // Get/create cache, then get a model bound to it
@@ -264,14 +276,13 @@ function startBot(config) {
                 chatSession = {
                     chat: cachedModel.startChat({}),
                     lastResponse: null,
-                    orderCompleted: false,  // האם ההזמנה הושלמה בהצלחה
+                    orderCompleted: false,  // האם ההזמנה הושלמה בהצלחה (מאופס per-message)
+                    orderSaved: false,      // האם הזמנה נשמרה אי-פעם בשיחה זו (לא מאופס)
                     reminderSent: false,    // האם כבר נשלחה תזכורת נטישה (מוגבל לפעם אחת)
                     reminderTimeout: null,  // מזהה ה-timeout של התזכורת
                 };
                 sessions.set(msg.from, chatSession);
             } else {
-                // איפוס מצב הזמנה — כל הודעה חדשה מאפסת את מצב ה-orderCompleted
-                // אך reminderSent לא מאופס כדי למנוע הטרדה חוזרת
                 chatSession.orderCompleted = false;
                 if (chatSession.reminderTimeout) clearTimeout(chatSession.reminderTimeout);
 
@@ -284,19 +295,19 @@ function startBot(config) {
             }
 
             // --- תזמון תזכורת נטישה ---
-            // שולח תזכורת אחת בלבד אם המשתמש לא מגיב ולא השלים הזמנה
-            if (!chatSession.reminderSent) {
+            // שולח תזכורת אחת בלבד אם המשתמש לא מגיב, לא השלים הזמנה, ולא שמר הזמנה בעבר
+            if (!chatSession.reminderSent && !chatSession.orderSaved) {
                 chatSession.reminderTimeout = setTimeout(async () => {
-                    if (!chatSession.orderCompleted && !chatSession.reminderSent) {
+                    if (!chatSession.orderSaved && !chatSession.reminderSent) {
                         chatSession.reminderSent = true;
                         try {
                             await client.sendMessage(
                                 msg.from,
                                 'היי! 😊 ראיתי שהתחלת הזמנה ולא סיימת. אם תרצה להמשיך — אני כאן בשבילך!'
                             );
-                            console.log(`[${config.displayName}] Churn reminder sent to ${msg.from}`);
+                            console.log(`[${resolvedConfig.displayName}] Churn reminder sent to ${msg.from}`);
                         } catch (e) {
-                            console.error(`[${config.displayName}] Failed to send churn reminder:`, e.message);
+                            console.error(`[${resolvedConfig.displayName}] Failed to send churn reminder:`, e.message);
                         }
                     }
                 }, CHURN_REMINDER_DELAY_MS);
@@ -320,10 +331,10 @@ function startBot(config) {
                                 mimeType: mediaData.mimetype || 'image/jpeg',
                             }
                         });
-                        console.log(`[${config.displayName}] Media received: ${mediaData.mimetype}`);
+                        console.log(`[${resolvedConfig.displayName}] Media received: ${mediaData.mimetype}`);
                     }
                 } catch (e) {
-                    console.error(`[${config.displayName}] Failed to download media:`, e.message);
+                    console.error(`[${resolvedConfig.displayName}] Failed to download media:`, e.message);
                 }
             }
 
@@ -332,7 +343,7 @@ function startBot(config) {
             let result = await chat.sendMessage(messageParts);
             let response = result.response;
 
-            console.log(`[${config.displayName}] cachedContentTokenCount: ${response.usageMetadata?.cachedContentTokenCount ?? 'N/A'}`);
+            console.log(`[${resolvedConfig.displayName}] cachedContentTokenCount: ${response.usageMetadata?.cachedContentTokenCount ?? 'N/A'}`);
 
             // --- עיבוד function calls ---
             // Vertex AI מחזיר function calls דרך candidates[0].content.parts
@@ -344,11 +355,14 @@ function startBot(config) {
                 for (const call of calls) {
                     // הזרקה אוטומטית של מספר השולח
                     const argsWithSender = { ...call.args, senderPhone: senderNumber };
+                    console.log(`[${resolvedConfig.displayName}] 🔧 Tool call: ${call.name}`, JSON.stringify(call.args));
                     const toolResult = await botTools[call.name](argsWithSender);
+                    console.log(`[${resolvedConfig.displayName}] ✅ Tool result: ${call.name}`, JSON.stringify(toolResult));
 
-                    // זיהוי השלמת הזמנה — מבטל את תזכורת הנטישה
+                    // זיהוי השלמת הזמנה — מבטל את תזכורת הנטישה ומסמן שהזמנה נשמרה לצמיתות
                     if (call.name === 'saveOrderToSheet' && toolResult?.success) {
                         chatSession.orderCompleted = true;
+                        chatSession.orderSaved = true;
                         if (chatSession.reminderTimeout) clearTimeout(chatSession.reminderTimeout);
                     }
 
@@ -394,14 +408,14 @@ function startBot(config) {
             }
 
         } catch (error) {
-            console.error(`[${config.id}] Error:`, error.message);
+            console.error(`[${resolvedConfig.id}] Error:`, error.message);
 
             const clientErrorMessage = "מצטערים, ארעה שגיאה טכנית קלה בזמן עיבוד הבקשה. המנהל קיבל עדכון ויצור איתך קשר בהקדם כדי להשלים את ההזמנה.";
             await msg.reply(clientErrorMessage);
 
             try {
                 const adminErrorReport = `⚠️ *דיווח שגיאה בבוט:*\nמשתמש: ${senderNumber}\nהודעה: ${body}\nשגיאה: ${error.message}`;
-                const adminJid = config.whatsappNumber.includes('@') ? config.whatsappNumber : `${config.whatsappNumber}@c.us`;
+                const adminJid = resolvedConfig.whatsappNumber.includes('@') ? resolvedConfig.whatsappNumber : `${resolvedConfig.whatsappNumber}@c.us`;
                 await client.sendMessage(adminJid, adminErrorReport);
             } catch (adminErr) {
                 console.error("Failed to notify admin about error:", adminErr.message);

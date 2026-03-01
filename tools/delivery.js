@@ -111,6 +111,15 @@ module.exports = [
                 }
             },
             {
+                name: "getCustomerHistory",
+                description: "Check if the customer has placed an order before. Call this ONCE at the very start of every new conversation, before asking any questions. Returns isKnownCustomer (bool), customerName, lastPickupAddress, and lastOrderDate if known.",
+                parameters: {
+                    type: FunctionDeclarationSchemaType.OBJECT,
+                    properties: {},
+                    required: []
+                }
+            },
+            {
                 name: "notifyAdmin",
                 description: "Notify the human manager in two cases: (1) A user asks a question the bot cannot answer and the answer is NOT in the FAQ. (2) The user shows clear signs of frustration, anger, or impatience — such as excessive punctuation ('!!!!', '????'), ALL CAPS writing, or phrases like 'terrible', 'useless', 'why is this taking so long', 'I give up'. In case (2), include 'לקוח מתוסכל' in the senderInfo field so the admin knows to intervene immediately.",
                 parameters: {

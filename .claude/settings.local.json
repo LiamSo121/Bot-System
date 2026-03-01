@@ -5,7 +5,8 @@
       "Bash(npm start:*)",
       "Bash(tasklist:*)",
       "Bash(taskkill:*)",
-      "Bash(cmd:*)"
+      "Bash(cmd:*)",
+      "Bash(mv:*)"
     ]
   }
 }

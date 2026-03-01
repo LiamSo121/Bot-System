@@ -300,7 +300,62 @@ To add a new bot type:
 
 ---
 
-## 11. Troubleshooting
+## 11. Stopping and Starting the Instance
+
+You can freely stop and start the EC2 instance without losing any data.
+
+### What survives a stop/start
+
+| Data | Where it lives | Safe? |
+|------|---------------|-------|
+| Orders | Google Sheets | Yes — external |
+| Calendar events | Google Calendar | Yes — external |
+| Code, `.env`, secrets | EBS root volume | Yes — persists on stop |
+| WhatsApp session | `.wwebjs_auth/` on EBS | Yes — persists on stop |
+| In-memory chat sessions | RAM | No — lost on stop (users mid-order must restart) |
+
+> **Stop vs Terminate**: Stop preserves the EBS volume. Terminate deletes it permanently. Never terminate unless you want to remove the instance entirely.
+
+### Stop the instance (AWS Console or CLI)
+
+```bash
+# AWS CLI (from your local machine)
+aws ec2 stop-instances --instance-ids <YOUR_INSTANCE_ID>
+```
+
+Or: AWS Console → EC2 → Instances → select instance → **Instance State → Stop**
+
+### Start the instance
+
+```bash
+# AWS CLI
+aws ec2 start-instances --instance-ids <YOUR_INSTANCE_ID>
+```
+
+Or: AWS Console → EC2 → Instances → select instance → **Instance State → Start**
+
+### Bot auto-starts on boot
+
+As long as you ran `pm2 startup` and `pm2 save` during setup (Step 7), the bot starts automatically when the instance boots — no manual action needed.
+
+To verify auto-start is configured:
+
+```bash
+# Should show liam-bot with status "online" after instance starts
+pm2 status
+```
+
+If the bot didn't start automatically, run:
+
+```bash
+cd ~/liam-bot-system
+pm2 start index.js --name liam-bot
+pm2 save
+```
+
+---
+
+## 12. Troubleshooting
 
 | Problem | Fix |
 |---------|-----|

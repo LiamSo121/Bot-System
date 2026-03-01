@@ -6,6 +6,7 @@
 const { google } = require('googleapis');
 const axios = require('axios');
 const fs = require('fs');
+const path = require('path');
 
 module.exports = (config) => ({
     // אימות כתובת מול Google Maps
@@ -72,7 +73,7 @@ module.exports = (config) => ({
     saveOrderToSheet: async (data) => {
         try {
             const auth = new google.auth.GoogleAuth({
-                keyFile: 'service-account.json',
+                keyFile: path.join(config.secretsDir || '.', 'service-account.json'),
                 scopes: ['https://www.googleapis.com/auth/spreadsheets'],
             });
             const sheets = google.sheets({ version: 'v4', auth });
@@ -112,7 +113,7 @@ module.exports = (config) => ({
     saveOrderToCalendar: async (data) => {
         try {
             const auth = new google.auth.GoogleAuth({
-                keyFile: 'service-account.json',
+                keyFile: path.join(config.secretsDir || '.', 'service-account.json'),
                 scopes: ['https://www.googleapis.com/auth/calendar.events'],
             });
             const calendar = google.calendar({ version: 'v3', auth });
@@ -146,7 +147,7 @@ module.exports = (config) => ({
     getOrdersFromSheet: async () => {
         try {
             const auth = new google.auth.GoogleAuth({
-                keyFile: 'service-account.json',
+                keyFile: path.join(config.secretsDir || '.', 'service-account.json'),
                 scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
             });
             const sheets = google.sheets({ version: 'v4', auth });
@@ -176,7 +177,7 @@ module.exports = (config) => ({
     updateOrderStatusInSheet: async ({ ordererName, date, updatePayment, updateCompleted }) => {
         try {
             const auth = new google.auth.GoogleAuth({
-                keyFile: 'service-account.json',
+                keyFile: path.join(config.secretsDir || '.', 'service-account.json'),
                 scopes: ['https://www.googleapis.com/auth/spreadsheets'],
             });
             const sheets = google.sheets({ version: 'v4', auth });
@@ -244,7 +245,7 @@ module.exports = (config) => ({
     generateOrdersReport: async () => {
         try {
             const auth = new google.auth.GoogleAuth({
-                keyFile: 'service-account.json',
+                keyFile: path.join(config.secretsDir || '.', 'service-account.json'),
                 scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
             });
             const sheets = google.sheets({ version: 'v4', auth });
@@ -284,6 +285,50 @@ module.exports = (config) => ({
         } catch (e) {
             console.error(`[${config.id}] Report Generation Error:`, e.message);
             return { success: false, error: "שגיאה ביצירת הדוח." };
+        }
+    },
+
+    // בדיקת היסטוריית לקוח לפי מספר טלפון — מחזיר שם ואחרון כתובת איסוף
+    getCustomerHistory: async ({ senderPhone }) => {
+        try {
+            const auth = new google.auth.GoogleAuth({
+                keyFile: path.join(config.secretsDir || '.', 'service-account.json'),
+                scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+            });
+            const sheets = google.sheets({ version: 'v4', auth });
+
+            const res = await sheets.spreadsheets.values.get({
+                spreadsheetId: config.spreadsheetId,
+                range: 'A:O',
+            });
+
+            const rows = res.data.values;
+            if (!rows || rows.length === 0) {
+                return { success: true, isKnownCustomer: false };
+            }
+
+            // Column D (index 3) = sender phone, saved with leading apostrophe
+            const normalizedSender = senderPhone.replace(/\D/g, '');
+            const customerOrders = rows.filter(row => {
+                const phone = row[3] ? row[3].replace(/'/g, '').replace(/\D/g, '') : '';
+                return phone === normalizedSender || phone === '972' + normalizedSender.replace(/^0/, '');
+            });
+
+            if (customerOrders.length === 0) {
+                return { success: true, isKnownCustomer: false };
+            }
+
+            const lastOrder = customerOrders[customerOrders.length - 1];
+            return {
+                success: true,
+                isKnownCustomer: true,
+                customerName: lastOrder[2] || '',       // Column C: orderer name
+                lastPickupAddress: lastOrder[4] || '',  // Column E: pickup address
+                lastOrderDate: lastOrder[0] || ''       // Column A: date
+            };
+        } catch (e) {
+            console.error(`[${config.id}] Customer History Error:`, e.message);
+            return { success: false, error: "שגיאה בשליפת היסטוריית לקוח." };
         }
     },
 

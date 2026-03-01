@@ -1,6 +1,5 @@
-# סודות וסביבה
-.env
-service-account.json
+# סודות וסביבה (per-bot, בתיקיית secrets/<bot-id>/)
+secrets/
 
 # ספריות
 node_modules/
