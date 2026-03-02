@@ -20,4 +20,4 @@ jobs:
             cd ~/liam-bot-system
             git pull origin main
             npm install --production
-            pm2 restart liam-bot"
+            pm2 restart liam-bot
