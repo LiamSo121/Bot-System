@@ -6,7 +6,11 @@
       "Bash(tasklist:*)",
       "Bash(taskkill:*)",
       "Bash(cmd:*)",
-      "Bash(mv:*)"
+      "Bash(mv:*)",
+      "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\":*)",
+      "Bash(timeout 20 node:*)",
+      "Bash(sed:*)",
+      "Bash(npm show:*)"
     ]
   }
 }

@@ -148,20 +148,34 @@ function startBot(config) {
     // --- WhatsApp Client Setup ---
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: resolvedConfig.id }),
+        webVersion: '2.3000.1034286518',
+        webVersionCache: { type: 'local' },
         puppeteer: {
-            executablePath: '/usr/bin/google-chrome-stable',
+            executablePath: process.platform === 'win32'
+                ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+                : '/usr/bin/google-chrome-stable',
             headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ],
-            protocolTimeout: 60000
+            args: process.platform === 'win32'
+                ? [
+                    '--no-sandbox',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--disable-gpu',
+                    '--disable-extensions',
+                    '--disable-features=ServiceWorker'
+                ]
+                : [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--single-process',
+                    '--disable-gpu',
+                    '--disable-extensions'
+                ],
+            protocolTimeout: 90000
         }
     });
 
@@ -408,6 +422,14 @@ function startBot(config) {
                             await client.sendMessage(toolResult.adminNumber, toolResult.adminAlert);
                         } catch (err) {
                             console.error("Failed to send admin alert:", err.message);
+                        }
+                    }
+                    if (toolResult && toolResult.clientNotification) {
+                        try {
+                            await client.sendMessage(toolResult.clientNotification.phone, toolResult.clientNotification.message);
+                            console.log(`[${resolvedConfig.displayName}] Client notification sent to ${toolResult.clientNotification.phone}`);
+                        } catch (err) {
+                            console.error(`[${resolvedConfig.displayName}] Failed to send client notification:`, err.message);
                         }
                     }
 

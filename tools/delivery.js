@@ -74,14 +74,14 @@ module.exports = [
             },
             {
                 name: "updateOrderStatusInSheet",
-                description: "Update the payment ('סטטוס תשלום') and/or completion ('הושלם') status of an existing order. Use this when the admin asks to mark an order as paid or completed.",
+                description: "Update the payment status and/or delivery status of an existing order. Use this when the admin asks to mark an order as paid, picked up, or delivered. After updating delivery status to 'נאסף' or 'נמסר', a notification is automatically sent to the client.",
                 parameters: {
                     type: FunctionDeclarationSchemaType.OBJECT,
                     properties: {
                         ordererName: { type: FunctionDeclarationSchemaType.STRING, description: "The name of the person who originally ordered (from column C)." },
                         date: { type: FunctionDeclarationSchemaType.STRING, description: "The date of the order (from column A)." },
                         updatePayment: { type: FunctionDeclarationSchemaType.STRING, description: "Optional. Set to 'כן' or 'לא' if updating payment status." },
-                        updateCompleted: { type: FunctionDeclarationSchemaType.STRING, description: "Optional. Set to 'כן' or 'לא' if updating completion status." }
+                        updateCompleted: { type: FunctionDeclarationSchemaType.STRING, description: "Optional. Delivery status: 'טרם בוצע' (default/not yet), 'נאסף' (package picked up by courier), 'נמסר' (package delivered to recipient)." }
                     },
                     required: ["ordererName", "date"]
                 }
