@@ -92,7 +92,7 @@ module.exports = (config) => ({
                 data.distance,
                 data.price,
                 "לא", // סטטוס תשלום
-                "לא", // הושלם
+                "טרם בוצע", // סטטוס משלוח
                 data.packageDetails // פרטי משלוח (אוכל/חבילה/משקל וכו') - עמודה O
             ];
 
@@ -173,7 +173,7 @@ module.exports = (config) => ({
         }
     },
 
-    // עדכון סטטוס הזמנה (תשלום והושלם) - עמודות L ו-M
+    // עדכון סטטוס הזמנה (תשלום וסטטוס משלוח) - עמודות M ו-N
     updateOrderStatusInSheet: async ({ ordererName, date, updatePayment, updateCompleted }) => {
         try {
             const auth = new google.auth.GoogleAuth({
@@ -182,7 +182,6 @@ module.exports = (config) => ({
             });
             const sheets = google.sheets({ version: 'v4', auth });
 
-            // 1. קריאת כל השורות כדי למצוא את השורה המתאימה
             const res = await sheets.spreadsheets.values.get({
                 spreadsheetId: config.spreadsheetId,
                 range: 'A:O',
@@ -193,11 +192,9 @@ module.exports = (config) => ({
                 return { success: false, error: "הטבלה ריקה." };
             }
 
-            // חיפוש השורה החופפת: שם מזמין ותאריך
             let rowIndex = -1;
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
-                // ערוץ A הוא התאריך (אינדקס 0), ערוץ C הוא שם המזמין (אינדקס 2)
                 if (row[0] === date && row[2] === ordererName) {
                     rowIndex = i;
                     break;
@@ -208,32 +205,51 @@ module.exports = (config) => ({
                 return { success: false, error: `לא נמצאה הזמנה עבור '${ordererName}' בתאריך '${date}'.` };
             }
 
-            // 2. עדכון השורה הספציפית
-            // שורות בגוגל שיטס מתחילות מ-1, לכן אינדקס 0 הוא שורה 1
             const sheetRowNumber = rowIndex + 1;
             const rangeToUpdate = `M${sheetRowNumber}:N${sheetRowNumber}`;
 
-            // נשמור על הערכים הקיימים אם לא ביקשו לעדכן אותם במפורש
-            // אינדקסים מעודכנים אחרי הזזת פלאפון המזמין לעמודה D (אינדקס 3)
-            // עמודות M ו-N הן אינדקס 12 ו-13
             const currentPayment = rows[rowIndex][12] || "לא";
-            const currentCompleted = rows[rowIndex][13] || "לא";
-
-            const newValues = [
-                [
-                    updatePayment !== undefined && updatePayment !== "" ? updatePayment : currentPayment,
-                    updateCompleted !== undefined && updateCompleted !== "" ? updateCompleted : currentCompleted
-                ]
-            ];
+            const currentCompleted = rows[rowIndex][13] || "טרם בוצע";
+            const newCompleted = (updateCompleted !== undefined && updateCompleted !== "") ? updateCompleted : currentCompleted;
 
             await sheets.spreadsheets.values.update({
                 spreadsheetId: config.spreadsheetId,
                 range: rangeToUpdate,
                 valueInputOption: 'USER_ENTERED',
-                resource: { values: newValues },
+                resource: {
+                    values: [[
+                        (updatePayment !== undefined && updatePayment !== "") ? updatePayment : currentPayment,
+                        newCompleted
+                    ]]
+                },
             });
 
-            return { success: true, message: "הסטטוסים עודכנו בהצלחה." };
+            // שליחת עדכון ללקוח אם סטטוס המשלוח השתנה ל-"נאסף" או "נמסר"
+            let clientNotification = null;
+            if (updateCompleted === 'נאסף' || updateCompleted === 'נמסר') {
+                const rawPhone = (rows[rowIndex][3] || '').replace(/'/g, '').replace(/\D/g, '');
+                const waPhone = rawPhone.startsWith('972')
+                    ? rawPhone
+                    : rawPhone.startsWith('0')
+                        ? '972' + rawPhone.substring(1)
+                        : rawPhone;
+
+                const clientName = rows[rowIndex][2] || 'לקוח יקר';
+                let notificationMsg;
+                if (updateCompleted === 'נאסף') {
+                    notificationMsg = `שלום ${clientName}! 😊\nרצינו לעדכן אותך שהשליח כבר אסף את החבילה — היא בדרך אליך! 🚚\nנעדכן אותך שוב כשהיא תימסר.`;
+                } else {
+                    notificationMsg = `שלום ${clientName}! 🎉\nשמחים לבשר שהחבילה שלך נמסרה בהצלחה.\nתודה שבחרת בעמית שליחויות — נשמח לשרת אותך שוב! 💪`;
+                }
+
+                if (waPhone) {
+                    clientNotification = { phone: `${waPhone}@c.us`, message: notificationMsg };
+                }
+            }
+
+            const result = { success: true, message: "הסטטוסים עודכנו בהצלחה." };
+            if (clientNotification) result.clientNotification = clientNotification;
+            return result;
 
         } catch (e) {
             console.error(`[${config.id}] Update Sheet Error:`, e.message);
